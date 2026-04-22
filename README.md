@@ -1,6 +1,6 @@
 # Laravel Booking Application
 
-A simple REST API built with Laravel that demonstrates production-grade containerization, CI/CD pipeline configuration, and Infrastructure as Code using Terraform on AWS.
+A simple REST API built with Laravel demonstrating production-grade containerization, CI/CD pipeline configuration, and Infrastructure as Code using Terraform on **Microsoft Azure**.
 
 > **Assessment note:** The application itself is intentionally minimal — two booking endpoints and a health check. The focus of this project is the infrastructure, containerization, and deployment configuration surrounding it.
 
@@ -15,6 +15,7 @@ A simple REST API built with Laravel that demonstrates production-grade containe
 - [Infrastructure as Code](#infrastructure-as-code)
 - [Project Structure](#project-structure)
 - [Assumptions](#assumptions)
+
 ---
 
 ## Quick Start
@@ -37,25 +38,25 @@ cd laravel-booking
 cp .env.example .env
 ```
 
-Open `.env` and confirm these values match `docker-compose.yml`:
+Open `.env` and set:
 
 ```env
-APP_KEY=base64:GENERATED_KEY
+APP_KEY=base64:YOUR_GENERATED_KEY
 DB_CONNECTION=mysql
 DB_HOST=db
 DB_PORT=3306
 DB_DATABASE=booking_db
-DB_USERNAME=laravel
-DB_PASSWORD=secret
+DB_USERNAME=root
+DB_PASSWORD=cherry@EMG
 ```
 
 Generate a fresh `APP_KEY`:
 
 ```bash
-# If you have PHP installed locally:
+# If PHP is installed locally:
 php artisan key:generate --show
 
-# Or generate one inside Docker after first boot:
+# Or after the containers start:
 docker compose exec app php artisan key:generate
 ```
 
@@ -74,8 +75,6 @@ This single command starts three services:
 | `db` | MySQL 8 database | `localhost:3307` |
 
 ### 4. Run database migrations
-
-In a second terminal:
 
 ```bash
 docker compose exec app php artisan migrate
@@ -100,7 +99,7 @@ curl http://localhost:8000/api/bookings/1
 
 ```bash
 docker compose down        # stop containers
-docker compose down -v     # stop containers and delete database volume
+docker compose down -v     # stop containers and wipe database volume
 ```
 
 ---
@@ -142,41 +141,54 @@ docker compose down -v     # stop containers and delete database volume
 ## Architecture Diagram
 
 ```
-                          ┌─────────────────────────────────────────────┐
-                          │                  AWS VPC                     │
-                          │                                              │
-  ┌──────────┐   HTTPS    │  ┌────────────┐        ┌──────────────────┐ │
-  │  Client  │ ─────────► │  │    ALB     │ ──────► │  ECS Fargate     │ │
-  └──────────┘            │  │ (public    │        │  (private subnet) │ │
-                          │  │  subnet)   │        │                  │ │
-                          │  └────────────┘        │  ┌────────────┐  │ │
-                          │                        │  │  Laravel   │  │ │
-  ┌──────────────────┐    │  ┌────────────┐        │  │  Container │  │ │
-  │   GitHub Actions │    │  │    NAT     │        │  └─────┬──────┘  │ │
-  │   CI/CD Pipeline │    │  │  Gateway   │        └────────┼─────────┘ │
-  │                  │    │  │ (public    │                 │           │
-  │  1. Test         │    │  │  subnet)   │        ┌────────▼─────────┐ │
-  │  2. Build image  │    │  └────────────┘        │  RDS MySQL       │ │
-  │  3. Push to ECR  │    │                        │  (private subnet) │ │
-  │  4. Approve      │    └─────────────────────────────────────────────┘
-  │  5. Deploy/      │
-  │     Rollback     │    ┌─────────────┐    ┌──────────────────────────┐
-  └──────┬───────────┘    │     ECR     │    │     Secrets Manager      │
-         │                │  (container │    │  - DB password           │
-         └──────────────► │   registry) │    │  - APP_KEY               │
-                          └─────────────┘    └──────────────────────────┘
+                         ┌──────────────────────────────────────────────────────────┐
+                         │                    Azure Subscription                    │
+                         │                                                          │
+                         │  ┌───────────────────────────────────────────────────┐   │
+                         │  │              Resource Group                        │   │
+                         │  │                                                   │   │
+  ┌──────────┐  HTTPS    │  │  ┌─────────────────────────────────────────────┐  │   │
+  │  Client  │ ────────► │  │  │             Virtual Network (VNet)          │  │   │
+  └──────────┘           │  │  │                                             │  │   │
+                         │  │  │  ┌─────────────────┐  ┌──────────────────┐  │  │   │
+                         │  │  │  │  Container subnet│  │   DB subnet      │  │  │   │
+  ┌──────────────────┐   │  │  │  │  (private)       │  │   (private)      │  │  │   │
+  │  GitHub Actions  │   │  │  │  │                  │  │                  │  │  │   │
+  │  CI/CD Pipeline  │   │  │  │  │ ┌──────────────┐ │  │ ┌────────────┐  │  │  │   │
+  │                  │   │  │  │  │ │Azure Container│ │  │ │  Azure DB  │  │  │  │   │
+  │ 1. Lint & test   │   │  │  │  │ │     Apps      │ │  │ │  for MySQL │  │  │  │   │
+  │ 2. Build image   │   │  │  │  │ │               │◄├──┼─┤ Flexible   │  │  │  │   │
+  │ 3. Push to ACR   │   │  │  │  │ │  Laravel app  │ │  │ │  Server    │  │  │  │   │
+  │ 4. Manual approve│   │  │  │  │ │  (replicas)   │ │  │ └────────────┘  │  │  │   │
+  │ 5. TF apply      │   │  │  │  │ └──────┬────────┘ │  └──────────────────┘  │  │   │
+  │ 6. Rollback      │   │  │  │  └─────────┼──────────┘                       │  │   │
+  └──────┬───────────┘   │  │  │            │ Built-in HTTPS ingress            │  │   │
+         │               │  │  └────────────┼─────────────────────────────────┘  │   │
+         │               │  │               │                                     │   │
+         │               │  │  ┌────────────▼──────┐  ┌─────────────────────┐    │   │
+         └──────────────►│  │  │  Azure Container   │  │   Azure Key Vault   │    │   │
+           push image    │  │  │  Registry (ACR)    │  │                     │    │   │
+                         │  │  │  (image storage)   │  │  - db-password      │    │   │
+                         │  │  └────────────────────┘  │  - app-key          │    │   │
+                         │  │                           └─────────────────────┘    │   │
+                         │  │  ┌────────────────────┐                              │   │
+                         │  │  │  Managed Identity   │ ── AcrPull ──► ACR         │   │
+                         │  │  │  (no credentials)   │ ── KV Secrets User ──► KV  │   │
+                         │  │  └────────────────────┘                              │   │
+                         │  └───────────────────────────────────────────────────┘   │
+                         └──────────────────────────────────────────────────────────┘
 
 
-Local Development:
+Local Development (docker compose up):
 
-  ┌─────────────────────────────────────────────────┐
-  │  docker compose up                              │
-  │                                                 │
-  │  ┌──────────┐    ┌──────────┐    ┌───────────┐  │
-  │  │  Nginx   │───►│  PHP-FPM │───►│  MySQL 8  │  │
-  │  │ :8000    │    │  (app)   │    │  :3307    │  │
-  │  └──────────┘    └──────────┘    └───────────┘  │
-  └─────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────┐
+  │                                                      │
+  │  ┌──────────────┐    ┌──────────┐    ┌───────────┐   │
+  │  │ Nginx        │───►│ PHP-FPM  │───►│  MySQL 8  │   │
+  │  │ :8000        │    │  (app)   │    │  :3307    │   │
+  │  └──────────────┘    └──────────┘    └───────────┘   │
+  │                                                      │
+  └──────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -185,77 +197,100 @@ Local Development:
 
 The pipeline is defined in `.github/workflows/deploy.yml` and runs on GitHub Actions.
 
+### GitHub Secrets required
+
+Add these in **Settings → Secrets and variables → Actions**:
+
+| Secret | Description |
+|---|---|
+| `AZURE_CLIENT_ID` | Service Principal app ID (has AcrPush + Terraform roles) |
+| `AZURE_CLIENT_SECRET` | Service Principal secret |
+| `AZURE_SUBSCRIPTION_ID` | Your Azure subscription ID |
+| `AZURE_TENANT_ID` | Your Azure Active Directory tenant ID |
+| `AZURE_CREDENTIALS` | Full JSON credentials blob for `azure/login` action |
+| `DB_PASSWORD` | MySQL password (written to Key Vault by Terraform) |
+| `APP_KEY` | Laravel APP_KEY (written to Key Vault by Terraform) |
+
 ### Pipeline stages
 
-#### Stage 1 — Lint and test (runs on every pull request)
+#### Stage 1 — Lint and test (every pull request)
 
-Triggered on every PR to `main`. Installs PHP dependencies, sets up an in-memory SQLite database, and runs the full PHPUnit test suite. A failing test blocks the PR from being merged.
+Installs PHP dependencies, sets up an in-memory SQLite database, and runs the full PHPUnit test suite plus a PHP syntax check across the `app/` directory. A failing test blocks the PR from being merged.
 
-**Why:** Catching bugs before they reach main protects the team and keeps the main branch always deployable.
+**Why:** Catching bugs before they reach `main` keeps the branch always deployable. SQLite in-memory means no external database is needed in CI — tests run fast and in isolation.
 
-#### Stage 2 — Build Docker image
+#### Stage 2 — Build and push Docker image (push to main)
 
-Runs on push to `main` after tests pass. Builds the Docker image using the production Dockerfile (multi-stage, Alpine-based) and tags it with the exact git commit SHA.
+Builds the production Docker image and tags it with the first 7 characters of the git commit SHA. Pushes both the SHA tag and `latest` to Azure Container Registry.
 
-**Why:** Tagging with the commit SHA creates an immutable, traceable artifact. You can always trace any running container back to the exact line of code that built it.
+**Why:** The SHA tag creates an immutable, traceable artifact. You can always identify exactly which commit is running in production. The image is built once and promoted through environments — never rebuilt.
 
-#### Stage 3 — Push to container registry
+#### Stage 3 — Terraform plan
 
-Authenticates to Amazon ECR using short-lived OIDC credentials (no long-lived keys stored in GitHub secrets) and pushes the tagged image.
+Authenticates to Azure, initialises the Terraform backend (Azure Blob Storage), and runs `terraform plan` with the new image tag. The plan output shows exactly what infrastructure changes will be made. The plan file is saved as a GitHub Actions artifact so Stage 5 applies the exact same plan that was reviewed.
 
-**Why:** ECR is private, versioned, and co-located with ECS. Images are scanned for vulnerabilities on push.
+**Why:** Separating plan from apply means there are no surprises during the deploy. The reviewer sees precisely what will change before approving.
 
 #### Stage 4 — Manual approval gate
 
-The workflow pauses before any production deployment and waits for a human to approve it via the GitHub Actions UI. No code reaches production without an explicit sign-off.
+The pipeline pauses and waits for a human to approve in the GitHub Actions UI. This is implemented using a GitHub Environment (`production`) with required reviewers configured.
 
-**Why:** Prevents automated deployments from silently breaking production. Especially important for database migrations or breaking API changes.
+**Why:** No code reaches production without explicit sign-off. Critical for catching issues like missed database migrations or breaking API changes that tests didn't catch.
 
-#### Stage 5 — Deploy (or rollback)
+#### Stage 5 — Deploy
 
-On approval, Terraform applies the updated infrastructure (new ECS task definition pointing at the new image tag). ECS performs a rolling deploy — new containers pass ALB health checks before old ones are drained.
+Applies the pre-approved Terraform plan (not a fresh plan — the same saved artifact). Container Apps uses `revision_mode = "Multiple"` which starts the new revision before deactivating the old one — zero downtime rolling deployment. A health check loop verifies the app is responding before the job completes.
 
-A separate `rollback` job can be manually triggered. It redeploys the previous image tag by passing the last known-good SHA as a Terraform variable, which updates the ECS task definition back to that image.
+**Why:** Applying the reviewed plan (not a new one) prevents race conditions where the infrastructure changes between plan and apply. The post-deploy health check gives early warning if the deployment is broken.
 
-**Why:** Rolling deploys give zero downtime. The rollback step means recovery from a bad deploy is a single button press, not a manual process.
+#### Stage 6 — Rollback
+
+Manually triggered via `workflow_dispatch` with a `rollback_tag` input (a previous git SHA). Reruns Terraform with the old image tag — no rebuild needed because the old image is still in ACR. Requires production environment approval before executing.
+
+**Why:** Recovery from a bad deploy is a one-click operation, not a manual emergency process. Since images are never deleted from ACR, any previous version can be redeployed instantly.
 
 ---
 
 ## Infrastructure as Code
 
-All AWS infrastructure is defined in the `terraform/` directory. No resources are hardcoded — everything is parameterised via variables.
+All Azure infrastructure is defined in the `terraform/` directory using the `azurerm` provider. No credentials or resource-specific values are hardcoded — everything is parameterised via variables.
 
 ### Resources provisioned
 
 | File | What it creates |
 |---|---|
-| `vpc.tf` | VPC, public subnets (ALB, NAT), private subnets (ECS, RDS) |
-| `ecr.tf` | Private container registry with vulnerability scanning |
-| `rds.tf` | MySQL 8 on `db.t3.micro`, in the private subnet, no public access |
-| `ecs.tf` | Fargate cluster, task definition, service with rolling deploy config |
-| `alb.tf` | Application Load Balancer, target group, health check listener |
-| `iam.tf` | ECS task execution role with least-privilege permissions |
-| `secrets.tf` | Secrets Manager entries for DB password and APP_KEY |
+| `main.tf` | Provider config, remote backend (Azure Blob Storage), Resource Group |
+| `variables.tf` | All input variables with descriptions and types |
+| `vnet.tf` | Virtual Network, private subnets (containers + DB), NSGs, private DNS zone |
+| `acr.tf` | Azure Container Registry (Standard tier, admin disabled) |
+| `mysql.tf` | MySQL Flexible Server in private subnet, application database |
+| `aca.tf` | Container Apps Environment, Container App with scaling rules, ingress, probes |
+| `rbac.tf` | Managed Identity, AcrPull role, Key Vault Secrets User role, CI push role |
+| `keyvault.tf` | Key Vault with RBAC auth, soft-delete, network ACLs, app secrets |
+| `outputs.tf` | App URL, ACR server, Key Vault URI, MySQL FQDN |
 
-### IAM approach
+### Identity and access approach
 
-The ECS task execution role has only two permissions:
+The Container App uses a **User-Assigned Managed Identity** — the Azure equivalent of an IAM instance role. It has exactly two permissions:
 
-1. The AWS-managed `AmazonECSTaskExecutionRolePolicy` (pull from ECR, write to CloudWatch Logs)
-2. A custom inline policy scoped to only the two specific Secrets Manager ARNs the app needs
+- `AcrPull` on this specific ACR — can pull images, nothing else
+- `Key Vault Secrets User` on this specific Key Vault — can read secret values, nothing else
 
-No wildcards (`*`) on resources or actions anywhere.
+No wildcard permissions (`*`) exist anywhere. No passwords or credentials are stored in the Container App configuration — secrets are Key Vault references, fetched by the platform at container startup.
 
 ### Secrets handling
 
-Secrets are never in environment variables, `.env` files, or Terraform state in plaintext. They are stored in AWS Secrets Manager and injected into the ECS container at runtime by the ECS agent. The application reads them as standard environment variables — no code changes needed.
+Secrets flow: GitHub secrets → Terraform variables → Azure Key Vault → Container App environment variables (injected at runtime by the platform).
 
-### Running Terraform locally (review only — no account needed)
+The raw secret value is never stored in Terraform state in plaintext (variables marked `sensitive = true`), never in source control, and never visible in Azure portal Container App configuration — only the Key Vault reference URI is stored there.
+
+### Reviewing the Terraform without an Azure account
 
 ```bash
 cd terraform
-terraform init
-terraform plan -var="image_tag=abc123" -var="db_password=example"
+terraform init -backend=false
+terraform validate
+terraform plan -var="image_tag=abc1234" -var="db_password=example" -var="app_key=base64:example"
 ```
 
 ---
@@ -266,50 +301,45 @@ terraform plan -var="image_tag=abc123" -var="db_password=example"
 laravel-booking/
 ├── app/
 │   └── Http/Controllers/Api/
-│       └── BookingController.php    # POST /bookings, GET /bookings/{id}
+│       └── BookingController.php       # POST /bookings, GET /bookings/{id}
 ├── database/migrations/
 │   └── xxxx_create_bookings_table.php
 ├── routes/
-│   └── api.php                      # Route definitions
-├── docker/
-│   ├── nginx.conf                   # Nginx config (single-container mode)
-│   └── supervisord.conf             # Supervisor config (nginx + php-fpm)
+│   └── api.php                         # Route definitions
 ├── nginx/
-│   └── default.conf                 # Nginx config (separate webserver container)
-├── Dockerfile                       # Multi-stage production image
-├── docker-compose.yml               # Local dev: app + webserver + db
-├── .env.example                     # Template — never commit .env
+│   └── default.conf                    # Nginx reverse proxy config
+├── Dockerfile                          # Multi-stage production image
+├── docker-compose.yml                  # Local dev: app + webserver + db
+├── .env.example                        # Template — never commit .env
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml               # GitHub Actions CI/CD pipeline
-├── terraform/
-│   ├── main.tf                      # Provider, backend config
-│   ├── variables.tf                 # All input variables
-│   ├── vpc.tf                       # Networking
-│   ├── ecr.tf                       # Container registry
-│   ├── rds.tf                       # Database
-│   ├── ecs.tf                       # Compute (Fargate)
-│   ├── alb.tf                       # Load balancer
-│   ├── iam.tf                       # Roles and policies
-│   ├── secrets.tf                   # Secrets Manager
-│   └── outputs.tf                   # ALB URL, ECR URL, RDS endpoint
-└── README.md
+│       └── deploy.yml                  # GitHub Actions CI/CD (Azure)
+└── terraform/
+    ├── main.tf                         # Provider, backend, resource group
+    ├── variables.tf                    # All input variables
+    ├── vnet.tf                         # VNet, subnets, NSGs, DNS
+    ├── acr.tf                          # Azure Container Registry
+    ├── mysql.tf                        # MySQL Flexible Server
+    ├── aca.tf                          # Azure Container Apps
+    ├── rbac.tf                         # Managed Identity, role assignments
+    ├── keyvault.tf                     # Key Vault, secrets
+    └── outputs.tf                      # App URL, ACR server, etc.
 ```
 
 ---
 
 ## Assumptions
 
-1. **AWS as the target cloud.** The assessment mentioned AWS, ECR, and ECS as examples — the entire IaC is AWS-native. The same patterns apply to Azure (AKS + ACR + Bicep) with minor translation.
+1. **Azure over AWS.** The assessment accepts either cloud. Azure was chosen and the entire stack is Azure-native: ACR, Azure Container Apps, Azure Database for MySQL, Key Vault, and Managed Identity.
 
-2. **Fargate over EC2.** I chose ECS Fargate rather than raw EC2 to avoid managing the underlying instances. For a containerised workload this is the right default — you pay per task, not per idle server.
+2. **Azure Container Apps over AKS.** Container Apps is the serverless container platform — the equivalent of ECS Fargate. AKS (full Kubernetes) would be overkill for a two-endpoint API and would require significantly more operational overhead. Container Apps includes built-in ingress, scaling, and rolling deployments at no extra configuration cost.
 
-3. **Single NAT gateway in dev.** `single_nat_gateway = true` on the VPC module reduces cost significantly in non-production. Production should use one NAT gateway per availability zone for resilience.
+3. **Terraform over Azure Bicep.** The assessment accepts either. Terraform was chosen because it is cloud-agnostic, widely used in industry, and the `azurerm` provider covers all required Azure resources fully.
 
-4. **MySQL over PostgreSQL.** Laravel works equally well with either. MySQL 8 was chosen because it is the most common default in Laravel projects.
+4. **User-Assigned Managed Identity over Service Principal credentials.** Managed Identity means zero credentials to rotate or store. The Container App authenticates to ACR and Key Vault without any password.
 
-5. **No HTTPS in the base config.** The ALB listener is HTTP on port 80. Adding HTTPS requires an ACM certificate, which requires a domain name — left out to keep the config runnable without a registered domain.
+5. **Single region deployment.** All resources are in one Azure region. A production setup would consider paired regions and geo-redundant database backups, but this adds significant complexity and cost for an assessment.
 
-6. **Migrations run manually on first deploy.** The pipeline does not auto-run `php artisan migrate`. This is intentional — running migrations automatically in CI on a production database is risky. In a mature setup this would be a separate, gated pipeline step.
+6. **Migrations run manually on first deploy.** `php artisan migrate` must be run once inside the container after the first deployment. Automating this safely in CI requires a dedicated pre-deploy job with its own approval gate — left out to keep the pipeline readable.
 
-7. **`desired_count = 2` on the ECS service.** Two tasks gives basic high availability across two availability zones without significant cost increase.
+7. **No custom domain or TLS certificate.** Container Apps provides a default HTTPS endpoint (`*.azurecontainerapps.io`). A custom domain with an Azure-managed certificate would require a registered domain name.

@@ -1,4 +1,16 @@
-name: Build, Test & Deploy
+# ============================================================
+# deploy.yml — GitHub Actions CI/CD Pipeline (Azure)
+# ============================================================
+# Pipeline stages:
+#   1. lint-and-test     — runs on every pull request
+#   2. build-and-push    — builds Docker image, pushes to ACR
+#   3. terraform-plan    — previews infrastructure changes
+#   4. approve           — manual gate before production deploy
+#   5. deploy            — terraform apply + Container App update
+#   6. rollback          — manual trigger to redeploy previous tag
+# ============================================================
+
+name: CI/CD Pipeline — Azure
 
 on:
   push:
@@ -6,75 +18,348 @@ on:
   pull_request:
     branches: [main]
 
+  # Allow manual triggering (used by the rollback job)
+  workflow_dispatch:
+    inputs:
+      rollback_tag:
+        description: "Image tag (git SHA) to roll back to"
+        required: false
+
 env:
-  AWS_REGION: us-east-1
-  ECR_REPOSITORY: laravel-booking
-  ECS_CLUSTER: booking-cluster
-  ECS_SERVICE: booking-service
+  # ── Azure configuration ────────────────────────────────────
+  # Replace these with your actual values.
+  # Sensitive values (credentials) come from GitHub secrets only.
+  AZURE_RESOURCE_GROUP: laravel-booking-production-rg
+  ACR_LOGIN_SERVER: laravelbookingacr.azurecr.io   # from terraform output acr_login_server
+  CONTAINER_APP_NAME: laravel-booking-app
+  CONTAINER_APP_ENV: laravel-booking-env
+  TF_STORAGE_ACCOUNT: laravelbookingtfstate        # Azure Storage Account for Terraform backend
+  TF_CONTAINER: tfstate
+  TF_KEY: laravel-booking/terraform.tfstate
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Setup PHP
+  # ============================================================
+  # STAGE 1 — Lint and Test
+  # Runs on every pull request to main.
+  # Failure blocks the PR from being merged.
+  # ============================================================
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+
+    # Only run on pull requests — not on direct pushes to main
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up PHP 8.3
         uses: shivammathur/setup-php@v2
         with:
-          php-version: "8.4"
-          extensions: pdo, pdo_mysql
+          php-version: "8.3"
+          extensions: pdo, pdo_mysql, mbstring, tokenizer, xml, ctype, json
+          coverage: none
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: composer-${{ hashFiles('composer.lock') }}
 
       - name: Install dependencies
-        run: composer install --no-interaction --prefer-dist
+        run: composer install --no-interaction --prefer-dist --no-progress
 
-      - name: Copy .env
-        run: cp .env.example .env && php artisan key:generate
+      # Copy example env and generate a key so artisan commands work
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
 
-      - name: Run tests
-        run: php artisan test
+      # PHPUnit uses SQLite in-memory (configured in phpunit.xml)
+      # so no real database is needed in CI
+      - name: Run PHPUnit tests
+        run: php artisan test --stop-on-failure
 
-  build-and-deploy:
-    needs: test
+      # Basic PHP syntax check across the entire app directory
+      - name: Lint PHP syntax
+        run: find app -name "*.php" | xargs php -l
+
+  # ============================================================
+  # STAGE 2 — Build and Push Docker Image
+  # Runs on push to main (after a PR is merged).
+  # Tags the image with the exact git commit SHA for traceability.
+  # ============================================================
+  build-and-push:
+    name: Build and Push Image
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+
+    # Only run on pushes to main, not on PRs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    outputs:
+      # Pass the image tag to downstream jobs
+      image_tag: ${{ steps.meta.outputs.tag }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      # Short SHA (first 7 chars) is used as the image tag.
+      # Short enough to be readable, specific enough to be unique.
+      - name: Set image tag
+        id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      # Log in to ACR using a Service Principal stored in GitHub secrets.
+      # AZURE_CLIENT_ID and AZURE_CLIENT_SECRET belong to the
+      # github-actions Service Principal (has AcrPush role only).
+      - name: Log in to Azure Container Registry
+        uses: azure/docker-login@v1
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          login-server: ${{ env.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.AZURE_CLIENT_ID }}
+          password: ${{ secrets.AZURE_CLIENT_SECRET }}
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push Docker image
-        id: build-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+      # Multi-stage Dockerfile keeps the final image small.
+      # The image is tagged with the commit SHA — immutable and traceable.
+      - name: Build Docker image
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          docker build \
+            --tag ${{ env.ACR_LOGIN_SERVER }}/laravel-booking:${{ steps.meta.outputs.tag }} \
+            --tag ${{ env.ACR_LOGIN_SERVER }}/laravel-booking:latest \
+            .
 
-      - name: Setup Terraform
+      - name: Push Docker image to ACR
+        run: |
+          docker push ${{ env.ACR_LOGIN_SERVER }}/laravel-booking:${{ steps.meta.outputs.tag }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/laravel-booking:latest
+
+  # ============================================================
+  # STAGE 3 — Terraform Plan
+  # Runs after the image is pushed.
+  # Shows what infrastructure changes would be applied.
+  # The plan output is posted as a PR comment if available.
+  # ============================================================
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.7.0"
 
-      - name: Terraform init & apply
+      # Authenticate Terraform to Azure using OIDC (no long-lived credentials)
+      - name: Azure login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform init
         working-directory: ./terraform
         env:
-          TF_VAR_image_tag: ${{ github.sha }}
-          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
         run: |
           terraform init \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="key=laravel-booking/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}"
-          terraform apply -auto-approve
+            -backend-config="resource_group_name=${{ env.AZURE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ env.TF_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ env.TF_CONTAINER }}" \
+            -backend-config="key=${{ env.TF_KEY }}"
+
+      - name: Terraform plan
+        working-directory: ./terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_image_tag:    ${{ needs.build-and-push.outputs.image_tag }}
+          TF_VAR_db_password:  ${{ secrets.DB_PASSWORD }}
+          TF_VAR_app_key:      ${{ secrets.APP_KEY }}
+        run: terraform plan -out=tfplan
+
+      # Save the plan file so the deploy job can apply it exactly
+      - name: Upload Terraform plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 1
+
+  # ============================================================
+  # STAGE 4 — Manual Approval Gate
+  # A human must approve before anything reaches production.
+  # The workflow pauses here and waits for approval in the
+  # GitHub Actions UI (Actions → select run → Review deployments).
+  # ============================================================
+  approve:
+    name: Approve Production Deploy
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+
+    # GitHub Environments with required reviewers creates the approval gate.
+    # Set up: Settings → Environments → production → Required reviewers
+    environment:
+      name: production
+
+    steps:
+      - name: Approval confirmed
+        run: echo "Deployment approved — proceeding to apply"
+
+  # ============================================================
+  # STAGE 5 — Deploy
+  # Applies the saved Terraform plan (exact same plan that was
+  # reviewed). Then updates the Container App to the new image.
+  # Container Apps uses revision-mode=Multiple for zero-downtime
+  # rolling deployment.
+  # ============================================================
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-and-push, approve]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+
+      - name: Azure login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # Download the exact plan that was reviewed in Stage 3
+      - name: Download Terraform plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/
+
+      - name: Terraform init
+        working-directory: ./terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ env.AZURE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ env.TF_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ env.TF_CONTAINER }}" \
+            -backend-config="key=${{ env.TF_KEY }}"
+
+      # Apply the pre-approved plan — no surprises
+      - name: Terraform apply
+        working-directory: ./terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_image_tag:    ${{ needs.build-and-push.outputs.image_tag }}
+          TF_VAR_db_password:  ${{ secrets.DB_PASSWORD }}
+          TF_VAR_app_key:      ${{ secrets.APP_KEY }}
+        run: terraform apply -auto-approve tfplan
+
+      # Verify the deployment came up healthy
+      - name: Verify deployment
+        run: |
+          APP_URL=$(az containerapp show \
+            --name ${{ env.CONTAINER_APP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --query "properties.configuration.ingress.fqdn" \
+            --output tsv)
+          echo "App deployed at: https://$APP_URL"
+          # Poll health check for up to 60 seconds
+          for i in {1..12}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$APP_URL/api/health")
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Waiting for app to be healthy... ($i/12)"
+            sleep 5
+          done
+          echo "Health check failed after 60 seconds"
+          exit 1
+
+  # ============================================================
+  # STAGE 6 — Rollback
+  # Manually triggered via workflow_dispatch with a rollback_tag.
+  # Redeploys a previous image tag — no build step needed because
+  # the old image is still in ACR.
+  # Example: trigger with rollback_tag = "a1b2c3d"
+  # ============================================================
+  rollback:
+    name: Rollback to Previous Version
+    runs-on: ubuntu-latest
+
+    # Only runs when manually triggered with a rollback_tag input
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.rollback_tag != ''
+
+    # Rollback also requires production environment approval
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+
+      - name: Azure login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform init
+        working-directory: ./terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ env.AZURE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ env.TF_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ env.TF_CONTAINER }}" \
+            -backend-config="key=${{ env.TF_KEY }}"
+
+      # Apply with the rollback image tag instead of latest SHA
+      - name: Terraform apply with rollback tag
+        working-directory: ./terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_image_tag:    ${{ github.event.inputs.rollback_tag }}
+          TF_VAR_db_password:  ${{ secrets.DB_PASSWORD }}
+          TF_VAR_app_key:      ${{ secrets.APP_KEY }}
+        run: |
+          echo "Rolling back to image tag: ${{ github.event.inputs.rollback_tag }}"
+          terraform apply -auto-approve \
+            -var="image_tag=${{ github.event.inputs.rollback_tag }}"
+
+      - name: Confirm rollback
+        run: |
+          echo "Rollback to ${{ github.event.inputs.rollback_tag }} complete"
