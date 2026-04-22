@@ -15,8 +15,6 @@ A simple REST API built with Laravel that demonstrates production-grade containe
 - [Infrastructure as Code](#infrastructure-as-code)
 - [Project Structure](#project-structure)
 - [Assumptions](#assumptions)
-- [What I Would Improve With More Time](#what-i-would-improve-with-more-time)
-
 ---
 
 ## Quick Start
