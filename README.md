@@ -315,22 +315,3 @@ laravel-booking/
 6. **Migrations run manually on first deploy.** The pipeline does not auto-run `php artisan migrate`. This is intentional — running migrations automatically in CI on a production database is risky. In a mature setup this would be a separate, gated pipeline step.
 
 7. **`desired_count = 2` on the ECS service.** Two tasks gives basic high availability across two availability zones without significant cost increase.
-
----
-
-## What I Would Improve With More Time
-
-**1. HTTPS with ACM and Route 53**
-The current setup serves traffic over plain HTTP. In production I would provision an ACM certificate, add an HTTPS listener on port 443 to the ALB, and redirect HTTP to HTTPS. This requires a registered domain but is straightforward with Terraform's `aws_acm_certificate` and `aws_route53_record` resources.
-
-**2. Automated database migrations in the pipeline**
-Right now migrations must be run manually inside a container. The better approach is a dedicated ECS task that runs `php artisan migrate --force` as a pre-deploy step in the pipeline, gated behind the same approval step as the main deploy. This makes deploys fully automated and auditable.
-
-**3. Autoscaling on the ECS service**
-The current config runs a fixed two tasks. Adding an `aws_appautoscaling_target` and `aws_appautoscaling_policy` based on ALB request count or CPU utilisation would let the service handle traffic spikes without manual intervention.
-
-**4. Terraform workspaces or separate state per environment**
-Currently there is one Terraform state file. A production setup would use separate state files (or Terraform workspaces) for `dev`, `staging`, and `production`, each with different variable values and potentially different AWS accounts.
-
-**5. Vulnerability scanning in the pipeline**
-ECR scans images on push, but the pipeline does not gate on the results. Adding a step that calls `aws ecr describe-image-scan-findings` and fails the build on critical CVEs would prevent known-vulnerable images from being deployed.
