@@ -27,7 +27,7 @@ A simple REST API built with Laravel that demonstrates production-grade containe
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/laravel-booking.git
+git clone https://github.com/kena-b-y/laravel-booking.git
 cd laravel-booking
 ```
 
@@ -40,7 +40,7 @@ cp .env.example .env
 Open `.env` and confirm these values match `docker-compose.yml`:
 
 ```env
-APP_KEY=base64:YOUR_GENERATED_KEY
+APP_KEY=base64:GENERATED_KEY
 DB_CONNECTION=mysql
 DB_HOST=db
 DB_PORT=3306
