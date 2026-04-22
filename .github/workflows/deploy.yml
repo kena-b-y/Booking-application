@@ -29,13 +29,13 @@ env:
   # ── Azure configuration ────────────────────────────────────
   # Replace these with your actual values.
   # Sensitive values (credentials) come from GitHub secrets only.
-  AZURE_RESOURCE_GROUP: laravel-booking-production-rg
-  ACR_LOGIN_SERVER: laravelbookingacr.azurecr.io   # from terraform output acr_login_server
-  CONTAINER_APP_NAME: laravel-booking-app
-  CONTAINER_APP_ENV: laravel-booking-env
-  TF_STORAGE_ACCOUNT: laravelbookingtfstate        # Azure Storage Account for Terraform backend
-  TF_CONTAINER: tfstate
-  TF_KEY: laravel-booking/terraform.tfstate
+  # AZURE_RESOURCE_GROUP: laravel-booking-production-rg
+  # ACR_LOGIN_SERVER: laravelbookingacr.azurecr.io   # from terraform output acr_login_server
+  # CONTAINER_APP_NAME: laravel-booking-app
+  # CONTAINER_APP_ENV: laravel-booking-env
+  # TF_STORAGE_ACCOUNT: laravelbookingtfstate        # Azure Storage Account for Terraform backend
+  # TF_CONTAINER: tfstate
+  # TF_KEY: laravel-booking/terraform.tfstate
 
 jobs:
 
