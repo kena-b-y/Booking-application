@@ -33,9 +33,9 @@ services:
     environment:
       MYSQL_DATABASE: booking_db
       MYSQL_ROOT_PASSWORD: root
-      MYSQL_PASSWORD: root
+      MYSQL_PASSWORD: cherry@2EMG
     ports:
-      - "3306:3306"
+      - "3307:3306"
     networks:
       - laravel
 
