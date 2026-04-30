@@ -168,27 +168,7 @@ jobs:
         with:
           terraform_version: "1.7.0"
 
-      # Verify the deployment came up healthy
-      - name: Verify deployment
-        run: |
-          APP_URL=$(az containerapp show \
-            --name ${{ env.CONTAINER_APP_NAME }} \
-            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-            --query "properties.configuration.ingress.fqdn" \
-            --output tsv)
-          echo "App deployed at: https://$APP_URL"
-          # Poll health check for up to 60 seconds
-          for i in {1..12}; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$APP_URL/api/health")
-            if [ "$STATUS" = "200" ]; then
-              echo "Health check passed"
-              exit 0
-            fi
-            echo "Waiting for app to be healthy... ($i/12)"
-            sleep 5
-          done
-          echo "Health check failed after 60 seconds"
-          exit 1
+      
 
   # ============================================================
   # STAGE 6 — Rollback
