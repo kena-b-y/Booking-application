@@ -25,7 +25,20 @@ on:
         description: "Image tag (git SHA) to roll back to"
         required: false
 
+env:
+  # ── Azure configuration ────────────────────────────────────
+  # Replace these with your actual values.
+  # Sensitive values (credentials) come from GitHub secrets only.
+  # AZURE_RESOURCE_GROUP: laravel-booking-production-rg
+  # ACR_LOGIN_SERVER: laravelbookingacr.azurecr.io   # from terraform output acr_login_server
+  # CONTAINER_APP_NAME: laravel-booking-app
+  # CONTAINER_APP_ENV: laravel-booking-env
+  # TF_STORAGE_ACCOUNT: laravelbookingtfstate        # Azure Storage Account for Terraform backend
+  # TF_CONTAINER: tfstate
+  # TF_KEY: laravel-booking/terraform.tfstate
+
 jobs:
+
   # ============================================================
   # STAGE 1 — Lint and Test
   # Runs on every pull request to main.
@@ -99,6 +112,30 @@ jobs:
         id: meta
         run: echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
 
+      # Log in to ACR using a Service Principal stored in GitHub secrets.
+      # AZURE_CLIENT_ID and AZURE_CLIENT_SECRET belong to the
+      # github-actions Service Principal (has AcrPush role only).
+      - name: Log in to Azure Container Registry
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ env.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.AZURE_CLIENT_ID }}
+          password: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      # Multi-stage Dockerfile keeps the final image small.
+      # The image is tagged with the commit SHA — immutable and traceable.
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag ${{ env.ACR_LOGIN_SERVER }}/laravel-booking:${{ steps.meta.outputs.tag }} \
+            --tag ${{ env.ACR_LOGIN_SERVER }}/laravel-booking:latest \
+            .
+
+      - name: Push Docker image to ACR
+        run: |
+          docker push ${{ env.ACR_LOGIN_SERVER }}/laravel-booking:${{ steps.meta.outputs.tag }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/laravel-booking:latest
+
   # ============================================================
   # STAGE 3 — Terraform Plan
   # Runs after the image is pushed.
@@ -118,6 +155,38 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.7.0"
+
+      # Authenticate Terraform to Azure using OIDC (no long-lived credentials)
+      - name: Azure login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform init
+        working-directory: ./terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ env.AZURE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ env.TF_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ env.TF_CONTAINER }}" \
+            -backend-config="key=${{ env.TF_KEY }}"
+
+      - name: Terraform plan
+        working-directory: ./terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_image_tag:    ${{ needs.build-and-push.outputs.image_tag }}
+          TF_VAR_db_password:  ${{ secrets.DB_PASSWORD }}
+          TF_VAR_app_key:      ${{ secrets.APP_KEY }}
+        run: terraform plan -out=tfplan
 
       # Save the plan file so the deploy job can apply it exactly
       - name: Upload Terraform plan
@@ -167,6 +236,45 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.7.0"
+
+      - name: Azure login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # Download the exact plan that was reviewed in Stage 3
+      - name: Download Terraform plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/
+
+      - name: Terraform init
+        working-directory: ./terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ env.AZURE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ env.TF_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ env.TF_CONTAINER }}" \
+            -backend-config="key=${{ env.TF_KEY }}"
+
+      # Apply the pre-approved plan — no surprises
+      - name: Terraform apply
+        working-directory: ./terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_image_tag:    ${{ needs.build-and-push.outputs.image_tag }}
+          TF_VAR_db_password:  ${{ secrets.DB_PASSWORD }}
+          TF_VAR_app_key:      ${{ secrets.APP_KEY }}
+        run: terraform apply -auto-approve tfplan
 
       # Verify the deployment came up healthy
       - name: Verify deployment
@@ -225,8 +333,32 @@ jobs:
       - name: Terraform init
         working-directory: ./terraform
         env:
-           ARM_CLIENT_ID: ${{ secrets.PROD_USER }}
-          ARM_CLIENT_SECRET: ${{ secrets.PROD_SECRET }}
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ env.AZURE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ env.TF_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ env.TF_CONTAINER }}" \
+            -backend-config="key=${{ env.TF_KEY }}"
+
+      # Apply with the rollback image tag instead of latest SHA
+      - name: Terraform apply with rollback tag
+        working-directory: ./terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_image_tag:    ${{ github.event.inputs.rollback_tag }}
+          TF_VAR_db_password:  ${{ secrets.DB_PASSWORD }}
+          TF_VAR_app_key:      ${{ secrets.APP_KEY }}
+        run: |
+          echo "Rolling back to image tag: ${{ github.event.inputs.rollback_tag }}"
+          terraform apply -auto-approve \
+            -var="image_tag=${{ github.event.inputs.rollback_tag }}"
 
       - name: Confirm rollback
         run: |
