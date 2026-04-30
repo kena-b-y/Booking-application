@@ -14,9 +14,9 @@ name: CI/CD Pipeline — Azure
 
 on:
   push:
-    branches: [main]
+    branches: []
   pull_request:
-    branches: [main]
+    branches: []
 
   # Allow manual triggering (used by the rollback job)
   workflow_dispatch:
