@@ -47,7 +47,7 @@ DB_HOST=db
 DB_PORT=3306
 DB_DATABASE=booking_db
 DB_USERNAME=root
-DB_PASSWORD=cherry@EMG
+DB_PASSWORD=
 ```
 
 Generate a fresh `APP_KEY`:
